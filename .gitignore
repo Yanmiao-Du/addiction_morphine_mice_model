@@ -1,0 +1,30 @@
+# R / RStudio
+.Rhistory
+.RData
+.Rproj.user
+.Rproj
+
+# Large data
+data/
+*.bam
+*.bai
+*.sam
+*.fastq
+*.fastq.gz
+*.fq.gz
+*.bw
+*.bigWig
+*.bed
+*.bed.gz
+
+# R objects
+*.rds
+*.RData
+
+# Logs / temp
+*.log
+*.out
+*.err
+*.tmp
+*.swp
+.DS_Store
