@@ -22,7 +22,7 @@ mkdir -p "${OUT_DIR}"
 # Effective genome size from deepTools docs for mm10 (~2.15e9)
 GENOME_SIZE=2150570000
 BIN_SIZE=25
-SMOOTH_LEN=75
+SMOOTH_LEN=150
 THREADS=8
 
 echo ">>> ROOT      : ${ROOT}"
@@ -62,7 +62,7 @@ find "${CHIP_DIR}" -type f -name "*unique.bam" ! -path "${OUT_DIR}/*" | sort | w
         --smoothLength "${SMOOTH_LEN}" \
         --normalizeUsing RPGC \
         --effectiveGenomeSize "${GENOME_SIZE}" \
-        --extendReads \
+        --extendReads 200\
         --centerReads \
         --ignoreDuplicates \
         --minMappingQuality 30 \
