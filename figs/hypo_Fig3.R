@@ -13,6 +13,7 @@ suppressPackageStartupMessages({
   library(grid)
   library(clusterProfiler)
   library(org.Mm.eg.db)
+  library(ggh4x)
 })
 
 ## ---------- Paths ----------
@@ -596,3 +597,387 @@ readr::write_tsv(bed_top_promoter, promoter_igv_bed, col_names = FALSE)
 
 cat("\nIGV BED for top promoter–DEG overlap peaks written to:\n  ",
     promoter_igv_bed, "\n")
+
+## ===============================================================
+## Immune-related GO terms from Enhancer & Promoter
+##  - extract terms + genes
+##  - label genes as Up / Down by H3K27ac Fold (MOR-LPS vs SAL-LPS)
+##  - bidirectional barplot
+## ===============================================================
+
+library(stringr)
+library(dplyr)
+library(readr)
+library(ggplot2)
+
+immune_pattern <- "immune|inflamm|cytokine|defense|leukocyte|macrophage|microglia|chemokine|interferon|B cell|lymphocyte|monocyte|neutrophil|antigen presentation|MHC|complement|phagocytosis"
+
+## --- 1. Subset immune GO terms from enhancer & promoter ---
+
+ego_enh <- read.delim2(file.path(out_dir, "Fig3F_GO_BP_Enhancer_MOR-LPS_vs_SAL-LPS.tsv"))
+ego_pro <- read.delim2(file.path(out_dir, "Fig3F_GO_BP_Promoter_MOR-LPS_vs_SAL-LPS.tsv"))
+
+
+immune_enh <- as.data.frame(ego_enh) %>%
+  dplyr::filter(str_detect(Description,
+                           regex(immune_pattern, ignore_case = TRUE))) %>%
+  dplyr::mutate(Source = "Enhancer")
+
+immune_pro <- as.data.frame(ego_pro) %>%
+  dplyr::filter(str_detect(Description,
+                           regex(immune_pattern, ignore_case = TRUE))) %>%
+  dplyr::mutate(Source = "Promoter")
+
+# Save full immune GO tables
+readr::write_tsv(immune_enh,
+                 file.path(out_dir, "Fig3F_Immune_GO_Enhancer_MOR-LPS_vs_SAL-LPS.tsv"))
+readr::write_tsv(immune_pro,
+                 file.path(out_dir, "Fig3F_Immune_GO_Promoter_MOR-LPS_vs_SAL-LPS.tsv"))
+
+## --- 2. Expand gene lists for those terms ---
+
+immune_go_all <- dplyr::bind_rows(immune_enh, immune_pro)
+immune_go_all
+immune_go_genes <- immune_go_all %>%
+  tidyr::separate_rows(geneID, sep = "/") %>%
+  dplyr::rename(Gene = geneID) %>%
+  dplyr::mutate(Gene = trimws(Gene))
+
+## --- 3. Determine direction (Up / Down) per gene from chip_tbl ---
+
+chip_dir <- chip_tbl %>%
+  dplyr::filter(
+    region %in% c("Enhancer", "Promoter"),
+    FDR < fdr_cut,
+    !is.na(SYMBOL)
+  ) %>%
+  dplyr::group_by(region, SYMBOL) %>%
+  dplyr::summarise(
+    mean_Fold = mean(Fold, na.rm = TRUE),
+    n_peaks   = dplyr::n(),
+    .groups   = "drop"
+  ) %>%
+  dplyr::mutate(
+    direction = dplyr::case_when(
+      mean_Fold >  0 ~ "Up (MOR-LPS > SAL-LPS)",
+      mean_Fold <  0 ~ "Down (MOR-LPS < SAL-LPS)",
+      TRUE           ~ "Mixed/0"
+    )
+  )
+
+immune_go_genes_dir <- immune_go_genes %>%
+  dplyr::left_join(
+    chip_dir,
+    by = c("Source" = "region", "Gene" = "SYMBOL")
+  )
+
+# Save gene-level table
+readr::write_tsv(
+  immune_go_genes_dir,
+  file.path(out_dir, "Fig3F_Immune_GO_EnhancerPromoter_genes_withDirection.tsv")
+)
+
+## --- 4. Summarise Up / Down counts per GO term & Source ---
+
+immune_counts <- immune_go_genes_dir %>%
+  dplyr::filter(direction %in% c("Up (MOR-LPS > SAL-LPS)",
+                                 "Down (MOR-LPS < SAL-LPS)")) %>%
+  dplyr::group_by(Source, ID, Description, direction) %>%
+  dplyr::summarise(
+    n_genes = dplyr::n_distinct(Gene),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    Description_wrapped = stringr::str_wrap(Description, 55),
+    # bidirectional: Down goes negative
+    signed_n = dplyr::if_else(
+      direction == "Down (MOR-LPS < SAL-LPS)",
+      -n_genes, n_genes
+    )
+  )
+
+## Order GO terms by total absolute gene count within each Source
+immune_counts <- immune_counts %>%
+  dplyr::group_by(Source, Description_wrapped) %>%
+  dplyr::mutate(total_abs = sum(abs(signed_n))) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(Source, total_abs) %>%
+  dplyr::mutate(
+    GO = factor(
+      Description_wrapped,
+      levels = unique(Description_wrapped)
+    )
+  )
+
+## --- 5. Bidirectional barplot (Up vs Down) faceted by Enhancer/Promoter ---
+
+theme_pub_immune <- theme_classic(base_size = 11, base_family = "Helvetica") +
+  theme(
+    axis.text.y = element_text(size = 9.5, color = "black"),
+    axis.text.x = element_text(size = 9.5, color = "black"),
+    axis.title  = element_text(face = "bold"),
+    strip.text  = element_text(face = "bold"),
+    plot.title  = element_text(size = 13, face = "bold", hjust = 0.5),
+    legend.position = "top",
+    plot.margin = margin(6, 10, 6, 6)
+  )
+
+p_immune_enh_pro <- ggplot(
+  immune_counts,
+  aes(x = signed_n, y = GO, fill = direction)
+) +
+  geom_col(width = 0.7) +
+  geom_vline(xintercept = 0, color = "black", linewidth = 0.4) +
+  facet_wrap(~Source, nrow = 1, scales = "free_y") +
+  scale_fill_manual(
+    values = c(
+      "Up (MOR-LPS > SAL-LPS)"   = "#56B4E9",
+      "Down (MOR-LPS < SAL-LPS)" = "#E64B35"
+    )
+  ) +
+  labs(
+    title = "Immune-related GO terms in H3K27ac Enhancer and Promoter Peaks",
+    x     = "Number of genes (Up vs Down)",
+    y     = NULL,
+    fill  = NULL
+  ) +
+  theme_pub_immune
+
+ggsave(
+  file.path(out_dir, "Fig3F_Immune_GO_EnhancerPromoter_bidirectional.pdf"),
+  p_immune_enh_pro, width = 9, height = 4.5, device = cairo_pdf
+)
+
+ggsave(
+  file.path(out_dir, "Fig3F_Immune_GO_EnhancerPromoter_bidirectional.png"),
+  p_immune_enh_pro, width = 9, height = 4.5, dpi = 600
+)
+
+## ---------------------------------------------------------------
+## expand to gene–GO pairs and annotate peak direction
+## ---------------------------------------------------------------
+## ===============================================================
+## 6. Figure 3G — Immune / sleep / temp / metabolic GO terms
+##     + gene list with direction of differential peak
+## ===============================================================
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+  library(ggplot2)
+  library(ggh4x)
+})
+
+PAT_IMMUNE <- paste(
+  c("immune","cytokine","leukocyte"," T cell ","B cell","myeloid",
+    "macrophage","microglia","interferon","chemokine",
+    "interleukin","IL-","TNF","NF-κB","Nfkb","inflammatory",
+    "inflammation"),
+  collapse = "|"
+)
+
+PAT_METAB <- paste(
+  c("lipid","glucose","insulin","thermogen","carbohydrate","triglyceride",
+    "temperature","body weight","adipose","fat","energy","thermogenesis","heat","cold"),
+  collapse = "|"
+)
+
+PAT_SLEEP <- paste(
+  c("sleep","circadian","rhythmic"),
+  collapse = "|"
+)
+
+ROOT      <- "/Users/yanmiaodu/Downloads/MOR_SAL/hypo"
+out_dir   <- ROOT
+ego_enh <- read.delim2(file.path(out_dir, "Fig3F_GO_BP_Enhancer_MOR-LPS_vs_SAL-LPS.tsv"))
+ego_pro <- read.delim2(file.path(out_dir, "Fig3F_GO_BP_Promoter_MOR-LPS_vs_SAL-LPS.tsv"))
+
+
+## helper: filter GO enrichments by regex pattern
+filter_go_keywords <- function(ego, source_label, pat_regex) {
+  if (is.null(ego) || nrow(as.data.frame(ego)) == 0) return(NULL)
+
+  as.data.frame(ego) %>%
+    mutate(
+      Source          = source_label,
+      Description     = as.character(Description),
+      Description_low = tolower(Description)
+    ) %>%
+    filter(str_detect(Description_low,
+                      regex(pat_regex, ignore_case = TRUE))) %>%
+    dplyr::select(ID, Description, GeneRatio, BgRatio,
+           pvalue, p.adjust, qvalue, geneID, Count, Source)
+}
+
+## ---- apply to enhancer / promoter GO results with SAME patterns ----
+immune_enh <- filter_go_keywords(ego_enh, "Enhancer", PAT_IMMUNE)
+immune_pro <- filter_go_keywords(ego_pro, "Promoter", PAT_IMMUNE)
+
+metab_enh  <- filter_go_keywords(ego_enh, "Enhancer", PAT_METAB)
+metab_pro  <- filter_go_keywords(ego_pro, "Promoter", PAT_METAB)
+
+sleep_enh  <- filter_go_keywords(ego_enh, "Enhancer", PAT_SLEEP)
+sleep_pro  <- filter_go_keywords(ego_pro, "Promoter", PAT_SLEEP)
+
+## add Theme label
+add_theme <- function(df, theme_label) {
+  if (is.null(df) || nrow(df) == 0) return(NULL)
+  df %>% mutate(Theme = theme_label)
+}
+
+go_thematic <- bind_rows(
+  add_theme(immune_enh, "Immune"),
+  add_theme(immune_pro, "Immune"),
+  add_theme(metab_enh,  "Metabolic/thermogenic"),
+  add_theme(metab_pro,  "Metabolic/thermogenic"),
+  add_theme(sleep_enh,  "Sleep/circadian"),
+  add_theme(sleep_pro,  "Sleep/circadian")
+)
+
+if (!is.null(go_thematic) && nrow(go_thematic) > 0) {
+
+  ## -----------------------------------------------------------
+  ## 1) GO × gene long format
+  ## -----------------------------------------------------------
+  go_gene_pairs <- go_thematic %>%
+    separate_rows(geneID, sep = "/") %>%
+    rename(
+      Gene      = geneID,
+      GO_ID     = ID,
+      GO_Desc   = Description,
+      GO_Source = Source
+    ) %>%
+    mutate(
+      Gene       = as.character(Gene),
+      Gene_upper = toupper(Gene)
+    ) %>%
+    distinct(GO_ID, GO_Desc, Theme, GO_Source, Gene_upper, Gene,
+             .keep_all = TRUE)
+
+  ## -----------------------------------------------------------
+  ## 2) Summarise H3K27ac direction per gene / region
+  ## -----------------------------------------------------------
+  chip_summary <- chip_sig %>%
+    filter(!is.na(SYMBOL), !is.na(Fold)) %>%
+    mutate(Gene_upper = toupper(SYMBOL)) %>%
+    filter(Gene_upper %in% go_gene_pairs$Gene_upper) %>%
+    mutate(
+      Direction = case_when(
+        Fold >  0 ~ "Up (MOR-LPS > SAL-LPS)",
+        Fold <  0 ~ "Down (MOR-LPS < SAL-LPS)",
+        TRUE      ~ "No change"
+      )
+    ) %>%
+    group_by(Gene_upper, region, Direction) %>%
+    summarise(
+      n_peaks   = n(),
+      max_absFC = max(abs(Fold), na.rm = TRUE),
+      best_FDR  = min(FDR,        na.rm = TRUE),
+      .groups   = "drop"
+    )
+
+  ## -----------------------------------------------------------
+  ## 3) Final Fig3G table (for supplement)
+  ## -----------------------------------------------------------
+  fig3G_table <- go_gene_pairs %>%
+    left_join(chip_summary, by = "Gene_upper") %>%
+    arrange(Theme, GO_Desc, region, Direction, Gene)
+
+  fig3G_table %>%
+    dplyr::select(
+      Theme, GO_Desc, GO_Source, Gene, region, Direction,
+      max_absFC, best_FDR
+    ) %>%
+    print(n = 80)
+
+  readr::write_tsv(
+    fig3G_table,
+    file.path(out_dir,
+              "Fig3G_thematic_GO_genes_peakDirection_MOR-LPS_vs_SAL-LPS.tsv")
+  )
+
+  ## -----------------------------------------------------------
+  ## 4) Summary for plotting: # genes Up vs Down per GO term
+  ## -----------------------------------------------------------
+  fig3G_summary <- fig3G_table %>%
+    filter(!is.na(Direction), !is.na(region)) %>%
+    group_by(Theme, GO_Desc, GO_Source, region, Direction) %>%
+    summarise(
+      n_genes = n_distinct(Gene),
+      .groups = "drop"
+    )
+
+  ## Theme order & colors (only keep present ones)
+  theme_order <- c("Immune", "Metabolic/thermogenic", "Sleep/circadian")
+  theme_levels_present <- intersect(theme_order, unique(fig3G_summary$Theme))
+
+  fig3G_summary <- fig3G_summary %>%
+    mutate(Theme = factor(Theme, levels = theme_levels_present))
+
+  theme_cols <- c(
+    "Immune"                 = "#fde0dd",  # light pink
+    "Metabolic/thermogenic"  = "#e5f5e0",  # light green
+    "Sleep/circadian"        = "#deebf7"   # light blue
+  )
+
+  bg_list_y <- lapply(
+    theme_levels_present,
+    function(th) element_rect(fill = theme_cols[[th]], color = "black")
+  )
+
+  ## -----------------------------------------------------------
+  ## 5) Directional barplot like example
+  ## -----------------------------------------------------------
+  p_fig3G <- ggplot(fig3G_summary,
+                    aes(x = GO_Desc, y = n_genes, fill = Direction)) +
+    geom_col(position = position_dodge(width = 0.7),
+             width = 0.6, color = "black") +
+    coord_flip(clip = "off") +
+    ggh4x::facet_grid2(
+      rows   = vars(Theme),
+      cols   = vars(region),
+      scales = "free_y",
+      space  = "free_y",
+      strip  = ggh4x::strip_themed(
+        background_y = bg_list_y,
+        background_x = element_rect(fill = "grey90", color = "black"),
+        text_x       = element_text(size = 10, face = "bold")
+      )
+    ) +
+    scale_fill_manual(values = c(
+      "Up (MOR-LPS > SAL-LPS)"    = "#56B4E9",
+      "Down (MOR-LPS < SAL-LPS)"  = "#E64B35",
+      "No change"                = "grey80"
+    )) +
+    labs(
+      title = "Directional H3K27ac changes across immune / metabolic / sleep pathways",
+      x     = NULL,
+      y     = "Number of genes",
+      fill  = NULL
+    ) +
+    theme_classic(base_size = 10) +
+    theme(
+      strip.text.y   = element_text(size = 0, colour = "transparent"),
+      strip.background = element_blank(),
+      axis.text.y    = element_text(size = 8, colour = "black"),
+      axis.text.x    = element_text(size = 8, colour = "black"),
+      plot.title     = element_text(size = 12, face = "bold", hjust = 0.5),
+      legend.position = "top",
+      legend.margin   = margin(b = 4),
+      panel.spacing.y = unit(3, "mm"),
+      plot.margin     = margin(8, 12, 8, 8)
+    )
+
+  ## width based on number of terms (so labels fit)
+  n_terms <- length(unique(fig3G_summary$GO_Desc))
+  pdf_width  <- max(6, 6 + 0.08 * n_terms)
+
+  ggsave(
+    file.path(out_dir, "Fig3G_thematic_GO_UpDown_bar.pdf"),
+    p_fig3G, width = pdf_width, height = 4, device = cairo_pdf
+  )
+  ggsave(
+    file.path(out_dir, "Fig3G_thematic_GO_UpDown_bar.png"),
+    p_fig3G, width = pdf_width, height = 4, dpi = 600
+  )
+}
