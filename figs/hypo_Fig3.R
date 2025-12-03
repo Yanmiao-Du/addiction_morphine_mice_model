@@ -370,6 +370,34 @@ ego_pro <- enrichGO(
   qvalueCutoff  = 0.05
 )
 
+diff_genes <- Reduce(intersect,
+                     list(enh_genes_sig, prom_genes_sig))
+ego_diffpeak <- enrichGO(
+  gene          = diff_genes,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+ego_all <- enrichGO(
+  gene          = Reduce(union, list(deg_sig, enh_genes_sig, prom_genes_sig)),
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "SYMBOL",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05
+)
+
+write_tsv(as.data.frame(ego_all),
+          file.path(out_dir, "Fig3F_GO_BP_AllFeatures_MOR-LPS_vs_SAL-LPS.tsv"))
+
+write_tsv(as.data.frame(ego_diffpeak),
+          file.path(out_dir, "Fig3F_GO_BP_DiffPeaks_MOR-LPS_vs_SAL-LPS.tsv"))
+
 write_tsv(as.data.frame(ego_deg),
           file.path(out_dir, "Fig3F_GO_BP_DEG_MOR-LPS_vs_SAL-LPS.tsv"))
 write_tsv(as.data.frame(ego_enh),
@@ -377,39 +405,70 @@ write_tsv(as.data.frame(ego_enh),
 write_tsv(as.data.frame(ego_pro),
           file.path(out_dir, "Fig3F_GO_BP_Promoter_MOR-LPS_vs_SAL-LPS.tsv"))
 
-plot_go_clean <- function(ego, title, top_n = 10) {
-  df <- ego@result %>%
-    arrange(p.adjust) %>%
-    slice_head(n = top_n) %>%
-    mutate(
-      Description = stringr::str_wrap(Description, 45),
-      GO = factor(Description, levels = rev(unique(Description)))
+
+## ===============================================================
+## 5. Figure 3F — GO BP enrichment (fixed axes / no overlap / no log10 error)
+## ===============================================================
+
+plot_go_clean <- function(ego, title, top_n = 10, wrap_width = 40) {
+
+  df <- as.data.frame(ego) %>%
+    dplyr::mutate(
+      p.adjust  = as.numeric(p.adjust),
+      Count     = as.numeric(Count),
+      GeneRatio = as.character(GeneRatio)
+    ) %>%
+    dplyr::filter(!is.na(p.adjust), p.adjust > 0) %>%
+    dplyr::arrange(p.adjust) %>%
+    dplyr::slice_head(n = top_n) %>%
+    dplyr::mutate(
+      Description_wrapped = stringr::str_wrap(Description, wrap_width),
+      GO = factor(Description_wrapped, levels = rev(unique(Description_wrapped))),
+      GeneRatio_num = sapply(strsplit(GeneRatio, "/"), function(x) {
+        as.numeric(x[1]) / as.numeric(x[2])
+      }),
+      negLog10FDR = -log10(p.adjust)
     )
 
-  ggplot(df, aes(x = GeneRatio, y = GO,
-                 size = Count, color = -log10(p.adjust))) +
+  # x-axis limits: start a bit smaller than the min
+  xmin <- min(df$GeneRatio_num) * 0.9
+  xmax <- max(df$GeneRatio_num) * 1.05
+
+  ggplot(df, aes(x = GeneRatio_num, y = GO,
+                 size = Count, color = negLog10FDR)) +
     geom_point(alpha = 0.9) +
     scale_color_gradient(low = "#56B4E9", high = "#E64B35") +
+    scale_x_continuous(
+      name   = "Gene Ratio",
+      limits = c(xmin, xmax),
+      breaks = scales::pretty_breaks(4),
+      expand = c(0, 0)
+    ) +
     labs(
       title = title,
-      x = "Gene Ratio",
-      y = NULL,
-      color = expression(-log[10]~FDR)
+      y     = NULL,
+      color = expression(-log[10]~FDR),
+      size  = "Count"
     ) +
-    theme_classic(base_size = 11, base_family = "Helvetica") +
+    theme_bw(base_size = 11, base_family = "Helvetica") +
     theme(
-      axis.text.y = element_text(size = 9.5, color = "black"),
-      axis.text.x = element_text(size = 9.5, color = "black"),
-      axis.title  = element_text(face = "bold"),
-      plot.title  = element_text(face = "bold", size = 12, hjust = 0.5),
-      legend.position = "right",
-      panel.grid.major = element_line(color = "grey90", linewidth = 0.3)
+      panel.grid.major = element_line(color = "grey90", linewidth = 0.3),
+      panel.grid.minor = element_blank(),
+      axis.text.y  = element_text(size = 9,  color = "black"),
+      axis.text.x  = element_text(size = 8.5, color = "black"),
+      axis.title   = element_text(face = "bold"),
+      plot.title   = element_text(face = "bold", size = 12, hjust = 0.5),
+      legend.position    = "right",
+      legend.key.height  = unit(0.5, "lines"),
+      plot.margin        = margin(5.5, 10, 5.5, 5.5)
     )
 }
 
-p_deg_go <- plot_go_clean(ego_deg,  "RNA-seq (DEGs)")
-p_enh_go <- plot_go_clean(ego_enh,  "H3K27ac Enhancer Peaks")
-p_pro_go <- plot_go_clean(ego_pro,  "H3K27ac Promoter Peaks")
+
+
+p_deg_go <- plot_go_clean(ego_deg, "RNA-seq (DEGs)")
+p_enh_go <- plot_go_clean(ego_enh, "H3K27ac Enhancer Peaks")
+p_pro_go <- plot_go_clean(ego_pro, "H3K27ac Promoter Peaks")
 
 p_fig3F <- (p_deg_go | p_enh_go | p_pro_go) +
   plot_annotation(
@@ -419,12 +478,12 @@ p_fig3F <- (p_deg_go | p_enh_go | p_pro_go) +
     )
   )
 
-ggsave(file.path(out_dir, "Fig3F_GOterms_MOR-LPS_vs_SAL-LPS.pdf"),
-       p_fig3F, width = 18, height = 4.5, device = cairo_pdf)
-ggsave(file.path(out_dir, "Fig3F_GOterms_MOR-LPS_vs_SAL-LPS.png"),
-       p_fig3F, width = 18, height = 4.5, dpi = 600)
+ggsave(file.path(out_dir, "Fig3F_GOterms_MOR-LPS_vs-SAL-LPS.pdf"),
+       p_fig3F, width = 16, height = 4, device = cairo_pdf)
+ggsave(file.path(out_dir, "Fig3F_GOterms_MOR-LPS_vs-SAL-LPS.png"),
+       p_fig3F, width = 16, height = 4, dpi = 600)
 
-cat(" Figure 3B–F done. Outputs in:\n", out_dir, "\n")
+
 
 ## ===============================================================
 ## Identify the 3-way overlap genes and export regions for IGV
@@ -469,3 +528,71 @@ overlap_deg_rows <- deg_tbl %>%
 
 cat("\nDEG stats for 3-way overlap genes:\n")
 print(overlap_deg_rows)
+
+## ===============================================================
+## Find strongest promoter diff peaks overlapping DEGs
+##  - region == "Promoter"
+##  - gene in DEGs ∩ Promoter
+##  - rank by FDR first, then |Fold|
+## ===============================================================
+
+# genes in the DEG–Promoter overlap (the 53 in the Venn)
+overlap_deg_prom_genes <- intersect(deg_genes, promoter_genes)
+
+length(overlap_deg_prom_genes)
+print(overlap_deg_prom_genes[1:5])  # preview
+
+promoter_overlap_peaks <- chip_tbl %>%
+  dplyr::filter(
+    region == "Promoter",
+    SYMBOL %in% overlap_deg_prom_genes,
+    !is.na(FDR),
+    FDR < fdr_cut
+  )
+
+cat("Number of promoter peaks linked to DEG genes (FDR <", fdr_cut, "): ",
+    nrow(promoter_overlap_peaks), "\n")
+
+## ---- top overall (strongest + most significant) ----
+top_promoter_peaks <- promoter_overlap_peaks %>%
+  dplyr::arrange(FDR, dplyr::desc(abs(Fold))) %>%
+  dplyr::select(SYMBOL, seqnames, start, end, Fold, FDR) %>%
+  dplyr::slice_head(n = 5)
+
+cat("\nTop promoter diff peaks overlapping DEGs (ranked by FDR then |Fold|):\n")
+print(top_promoter_peaks)
+
+## OPTIONAL: split into strongest up and strongest down
+top_promoter_up <- promoter_overlap_peaks %>%
+  dplyr::filter(Fold > 0) %>%
+  dplyr::arrange(FDR, dplyr::desc(Fold)) %>%
+  dplyr::select(SYMBOL, seqnames, start, end, Fold, FDR, baseMean) %>%
+  dplyr::slice_head(n = 5)
+
+top_promoter_down <- promoter_overlap_peaks %>%
+  dplyr::filter(Fold < 0) %>%
+  dplyr::arrange(FDR, Fold) %>%     # more negative first
+  dplyr::select(SYMBOL, seqnames, start, end, Fold, FDR, baseMean) %>%
+  dplyr::slice_head(n = 5)
+
+cat("\nTop 5 UP promoter peaks overlapping DEGs:\n")
+print(top_promoter_up)
+
+cat("\nTop 5 DOWN promoter peaks overlapping DEGs:\n")
+print(top_promoter_down)
+
+## OPTIONAL: IGV BED for those top peaks
+bed_top_promoter <- top_promoter_peaks %>%
+  dplyr::mutate(
+    chrom      = as.character(seqnames),
+    chromStart = as.integer(start) - 1L,
+    chromEnd   = as.integer(end),
+    name       = paste(SYMBOL, sprintf("Fold=%.2f", Fold), sep = "_")
+  ) %>%
+  dplyr::select(chrom, chromStart, chromEnd, name)
+
+promoter_igv_bed <- file.path(out_dir, "Fig3_promoter_DEG_overlap_topPeaks_forIGV.bed")
+readr::write_tsv(bed_top_promoter, promoter_igv_bed, col_names = FALSE)
+
+cat("\nIGV BED for top promoter–DEG overlap peaks written to:\n  ",
+    promoter_igv_bed, "\n")

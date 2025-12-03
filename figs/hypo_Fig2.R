@@ -7,6 +7,7 @@
 suppressPackageStartupMessages({
   library(tidyverse)
   library(ggrepel)
+  library(ggtext)
   library(patchwork)
   library(VennDiagram)
   library(grid)
@@ -18,179 +19,225 @@ suppressPackageStartupMessages({
   library(stringr)
 })
 
-# ===============================================================
-# Figure 2C — Volcano plots for differential peaks & DEGs
-# MOR–SAL vs SAL–SAL
-# ===============================================================
+out_dir <- "/Users/yanmiaodu/Downloads/MOR_SAL/hypo"
 
-theme_pub <- theme_classic(base_size = 12, base_family = "Helvetica") +
-  theme(
-    axis.text = element_text(color = "black"),
-    axis.title = element_text(face = "bold"),
-    plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
-    panel.grid.major = element_line(color = "grey90", linewidth = 0.3),
-    panel.grid.minor = element_blank()
-  )
-
-# ---------- Input ----------
+## ---------- Input ----------
 deg_file  <- "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/DEGs_treatment_only/SAL_SAL_vs_MOR_SAL_ALL.tsv"
 chip_file <- "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/Diff_analysis/Annotated_MORSAL_vs_SALSAL.tsv"
-sig_anno_chip <- "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/Diff_analysis/Annotated_MORSAL_vs_SALSAL.tsv"
-sig_chip <- read_tsv(sig_anno_chip, show_col_types = FALSE)
+diffbind_rda   <- file.path(ROOT, "hypo_diffbind_DESeq2_allContrasts.RData")
 
-# ---------- Parameters ----------
+## ---------- Parameters ----------
 fdr_cut <- 0.05
 lfc_cut <- 0.25
-col_promoter <- "#56B4E9"
-col_enhancer <- "#E69F00"
-col_ns <- "grey80"
 
-# ---------- DEG volcano ----------
-deg <- read_tsv(deg_file, show_col_types = FALSE) %>%
-  rename(FDR = padj) %>%  # rename padj -> FDR
-  mutate(
-    log2FoldChange = ifelse(is.na(log2FoldChange), 0, log2FoldChange),
-    sig = ifelse(FDR < fdr_cut & abs(log2FoldChange) > lfc_cut, "Sig", "NS")
+col_deg       <- "#009E73"
+col_enhancer  <- "#E69F00"
+col_promoter  <- "#56B4E9"
+col_ns        <- "grey80"
+
+theme_pub <- theme_classic(base_size = 11, base_family = "Helvetica") +
+  theme(
+    axis.text.x = element_text(size = 10, color = "black"),
+    axis.text.y = element_text(size = 9,  color = "black"),
+    axis.title  = element_text(face = "bold"),
+    plot.title  = element_text(size = 13, face = "bold", hjust = 0.5),
+    panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3),
+    panel.grid.minor   = element_blank(),
+    axis.line          = element_line(color = "black", linewidth = 0.4),
+    plot.margin        = margin(6, 6, 6, 6)
   )
 
-top_deg <- deg %>%
-  filter(sig == "Sig") %>%
-  slice_max(abs(log2FoldChange), n = 10)
+# ===============================================================
+# 1. Load data (shared across all Fig2 panels)
+# ===============================================================
 
-p_deg <- ggplot(deg, aes(x = log2FoldChange, y = -log10(FDR))) +
-  geom_point(aes(color = sig), size = 1.8, alpha = 0.8) +
-  scale_color_manual(values = c("Sig" = "#009E73", "NS" = col_ns)) +
-  geom_vline(xintercept = c(-lfc_cut, lfc_cut), linetype = "dashed", color = "grey50") +
-  geom_hline(yintercept = -log10(fdr_cut), linetype = "dashed", color = "grey50") +
-  geom_text_repel(data = top_deg, aes(label = gene_name),
-                  size = 3, color = "black", max.overlaps = 12) +
-  labs(title = "RNA-seq (DEGs)",
-       x = expression(log[2]~fold~change),
-       y = expression(-log[10]~adjusted~italic(P))) +
+## --- DEGs: SAL_SAL_vs_MOR_SAL_ALL.tsv ---
+deg_raw <- read_tsv(deg_file, show_col_types = FALSE)
+
+deg_tbl <- deg_raw %>%
+  dplyr::rename(FDR = padj) %>%
+  mutate(
+    ## flip so + = MOR–SAL / SAL–SAL
+    log2FC = -log2FoldChange,
+    log2FC = ifelse(is.na(log2FC), 0, log2FC),
+    sig = if_else(FDR < fdr_cut & abs(log2FC) > lfc_cut, "Sig", "NS")
+  )
+
+## --- ChIP: annotated differential peaks (MORSAL vs SALSAL) ---
+load(diffbind_rda)   # loads dbObj_clean and others
+
+## contrast 2 was MOR-LPS vs SAL-LPS in your earlier code
+mor_sal_vs_sal_sal_all <- DiffBind::dba.report(
+  dbObj_clean,
+  contrast = 5,
+  th = 1  # th=1 -> all peaks with FDR
+)
+
+chip_all <- as.data.frame(mor_sal_vs_sal_sal_all) %>%
+  as_tibble() %>%
+  mutate(
+    seqnames = as.character(seqnames),
+    start = start,
+    end = end
+  )
+
+## --- Annotation file (only FDR<0.05) for region + SYMBOL ---
+chip_anno <- read_tsv(chip_file, show_col_types = FALSE)
+
+chip_anno_min <- chip_anno %>%
+  dplyr::select(seqnames, start, end, annotation, SYMBOL)
+
+## join annotation onto full DiffBind table
+chip_tbl <- chip_all %>%
+  left_join(chip_anno_min,
+            by = c("seqnames", "start", "end")) %>%
+  mutate(
+    region = case_when(
+      !is.na(annotation) &
+        str_detect(annotation, regex("promoter", ignore_case = TRUE)) ~ "Promoter",
+      !is.na(annotation)                                             ~ "Enhancer",
+      TRUE                                                           ~ "Unannotated"
+    ),
+    sig = case_when(
+      FDR < fdr_cut & abs(Fold) > lfc_cut & region == "Promoter" ~ "Promoter",
+      FDR < fdr_cut & abs(Fold) > lfc_cut & region == "Enhancer" ~ "Enhancer",
+      TRUE                                                       ~ "NS"
+    )
+  )
+
+## Keep a convenience object of FDR-significant, annotated peaks (for bars/GO)
+chip_sig <- chip_tbl %>%
+  filter(FDR < fdr_cut & region %in% c("Enhancer", "Promoter"))
+
+# ===============================================================
+# Figure 2C — Volcano plots for differential peaks & DEGs
+# ===============================================================
+
+## ---- choose top DEGs to label ----
+top_deg <- deg_tbl %>%
+  filter(sig == "Sig") %>%
+  arrange(FDR, desc(abs(log2FC))) %>%
+  slice_head(n = 10)
+
+p_deg <- ggplot(deg_tbl, aes(x = log2FC, y = -log10(FDR))) +
+  geom_point(aes(color = sig), size = 1.6, alpha = 0.8) +
+  scale_color_manual(values = c("Sig" = col_deg, "NS" = col_ns)) +
+  geom_vline(xintercept = c(-lfc_cut, lfc_cut),
+             linetype = "dashed", color = "grey50") +
+  geom_hline(yintercept = -log10(fdr_cut),
+             linetype = "dashed", color = "grey50") +
+  geom_text_repel(
+    data = top_deg,
+    aes(label = gene_name),
+    size = 3, color = "black", max.overlaps = 30
+  ) +
+  labs(
+    title = "RNA-seq (DEGs)",
+    x = expression(log[2]~fold~change~"(MOR-SAL / SAL-SAL)"),
+    y = expression(-log[10]~adjusted~italic(P))
+  ) +
   theme_pub +
   theme(legend.position = "none")
 
-# ---------- DiffPeak volcano ----------
-chip <- read_tsv(chip_file, show_col_types = FALSE) %>%
-  mutate(
-    Fold = -Fold,  # reverse direction for consistency (MOR–SAL > SAL–SAL)
-    region = if_else(grepl("promoter", annotation, ignore.case = TRUE),
-                     "Promoter", "Enhancer"),
-    sig = ifelse(FDR < fdr_cut & abs(Fold) > 0, region, "NS")
+## ---- choose top ChIP peaks to label ----
+top_chip <- chip_tbl %>%
+  filter(sig != "NS") %>%
+  arrange(FDR, desc(abs(Fold))) %>%
+  slice_head(n = 10)
+
+chip_plot_tbl <- chip_tbl %>%
+  filter(!is.na(FDR), FDR < 0.999)
+
+p_chip <- ggplot(chip_plot_tbl, aes(x = Fold, y = -log10(FDR))) +
+  geom_point(aes(color = sig), size = 1.8, alpha = 0.8) +
+  scale_color_manual(values = c(
+    "Enhancer" = col_enhancer,
+    "Promoter" = col_promoter,
+    "NS"       = col_ns
+  )) +
+  geom_vline(xintercept = c(-lfc_cut, lfc_cut),
+             linetype = "dashed", color = "grey50") +
+  geom_hline(yintercept = -log10(fdr_cut),
+             linetype = "dashed", color = "grey50") +
+  geom_text_repel(
+    data = top_chip,
+    aes(label = SYMBOL),
+    size = 3,
+    max.overlaps = 15
+  ) +
+  labs(
+    title = "H3K27ac differential peaks",
+    x = expression(log[2]~fold~change~"(MOR-SAL / SAL-SAL)"),
+    y = expression(-log[10]~adjusted~italic(P))
+  ) +
+  theme_pub +
+  theme(
+    legend.position = "top",
+    legend.title    = element_blank()
   )
 
-top_chip <- chip %>%
-  filter(sig != "NS") %>%
-  slice_max(abs(Fold), n = 10)
-
-p_chip <- ggplot(chip, aes(x = Fold, y = -log10(FDR))) +
-  geom_point(aes(color = sig), size = 1.8, alpha = 0.8) +
-  scale_color_manual(values = c("Enhancer" = col_enhancer,
-                                "Promoter" = col_promoter,
-                                "NS" = col_ns)) +
-  geom_hline(yintercept = -log10(fdr_cut), linetype = "dashed", color = "grey50") +
-  geom_text_repel(data = top_chip, aes(label = SYMBOL),
-                  size = 3, color = "black", max.overlaps = 12) +
-  labs(title = "H3K27ac differential peaks",
-       x = expression(log[2]~fold~change),
-       y = expression(-log[10]~adjusted~italic(P))) +
-  theme_pub +
-  theme(legend.position = "top",
-        legend.title = element_blank())
-
-# ---------- Combine ----------
 p_combined <- p_chip | p_deg +
   plot_annotation(
     title = "MOR–SAL vs SAL–SAL",
     subtitle = "Differential peaks (Enhancer/Promoter) and DEGs",
     theme = theme(
-      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      plot.title    = element_text(size = 14, face = "bold", hjust = 0.5),
       plot.subtitle = element_text(size = 11, color = "grey25", hjust = 0.5)
     )
   )
-
-out_dir <- "/Users/yanmiaodu/Downloads/MOR_SAL/hypo"
 
 ggsave(file.path(out_dir, "Fig2C_volcano_MOR-SAL_vs_SAL-SAL.pdf"),
        p_combined, width = 7, height = 3.5, device = cairo_pdf)
 ggsave(file.path(out_dir, "Fig2C_volcano_MOR-SAL_vs_SAL-SAL.png"),
        p_combined, width = 7, height = 3.5, dpi = 600)
 
-p_combined
-
 # ===============================================================
-# Figure 2E — Numeric-only Venn diagram
+# Figure 2E — Numeric-only Venn diagram (FDR < 0.05 only)
 # ===============================================================
 
-library(VennDiagram)
-library(grid)
-
-# ---------- Input ----------
-deg_file  <- "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/DEGs_treatment_only/SAL_SAL_vs_MOR_SAL_ALL.tsv"
-chip_file <- "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/Diff_analysis/Annotated_MORSAL_vs_SALSAL.tsv"
-
-# ---------- Parameters ----------
-fdr_cut <- 0.05
-lfc_cut <- 0.25
-
-# ---------- Load DEGs ----------
-deg <- read_tsv(deg_file, show_col_types = FALSE) %>%
-  rename(FDR = padj, log2FC = log2FoldChange) %>%
-  filter(!is.na(FDR) & FDR < fdr_cut & abs(log2FC) > lfc_cut)
-
-deg_genes <- unique(deg$gene_name)
-
-# ---------- Load differential peaks ----------
-chip <- read_tsv(chip_file, show_col_types = FALSE) %>%
-  mutate(
-    region = if_else(grepl("promoter", annotation, ignore.case = TRUE),
-                     "Promoter", "Enhancer")
-  ) %>%
+deg_genes <- deg_tbl %>%
   filter(FDR < fdr_cut) %>%
-  select(region, SYMBOL) %>%
-  filter(!is.na(SYMBOL) & SYMBOL != "")
+  pull(gene_name) %>%
+  unique()
 
-enhancer_genes <- unique(chip$SYMBOL[chip$region == "Enhancer"])
-promoter_genes <- unique(chip$SYMBOL[chip$region == "Promoter"])
+enhancer_genes <- chip_sig %>%
+  filter(region == "Enhancer", !is.na(SYMBOL), SYMBOL != "") %>%
+  pull(SYMBOL) %>%
+  unique()
 
-# ---------- Prepare gene sets ----------
+promoter_genes <- chip_sig %>%
+  filter(region == "Promoter", !is.na(SYMBOL), SYMBOL != "") %>%
+  pull(SYMBOL) %>%
+  unique()
+
 venn_list <- list(
-  DEGs = deg_genes,
+  DEGs     = deg_genes,
   Enhancer = enhancer_genes,
   Promoter = promoter_genes
 )
-
-# ===============================================================
-# Figure 2E — Numeric-only Venn (centered labels)
-# ===============================================================
 
 venn_plot <- draw.triple.venn(
   area1 = length(venn_list$DEGs),
   area2 = length(venn_list$Enhancer),
   area3 = length(venn_list$Promoter),
-  n12 = length(intersect(venn_list$DEGs, venn_list$Enhancer)),
-  n23 = length(intersect(venn_list$Enhancer, venn_list$Promoter)),
-  n13 = length(intersect(venn_list$DEGs, venn_list$Promoter)),
-  n123 = length(Reduce(intersect, venn_list)),
-
+  n12   = length(intersect(venn_list$DEGs, venn_list$Enhancer)),
+  n23   = length(intersect(venn_list$Enhancer, venn_list$Promoter)),
+  n13   = length(intersect(venn_list$DEGs, venn_list$Promoter)),
+  n123  = length(Reduce(intersect, venn_list)),
   category = c("DEGs", "Enhancer", "Promoter"),
   fill = c("#00A087", "#E69F00", "#56B4E9"),
   alpha = rep(0.7, 3),
-
-  # ---- Label & number styling ----
   cat.cex = 1.3,
   cex = 1.3,
   cat.fontface = "bold",
   cat.col = "black",
   fontfamily = "sans",
   cat.fontfamily = "sans",
-
-  # ---- Position adjustments ----
-  cat.pos = c(-10, 10, 0),   # shifts labels inward
-  cat.dist = c(0.05, 0.05, 0.05), # distance from circles
-  margin = 0.08,              # adds padding so labels fit inside
-  scaled = FALSE,
-  euler.d = FALSE
+  cat.pos  = c(-10, 10, 0),
+  cat.dist = c(0.05, 0.05, 0.05),
+  margin   = 0.08,
+  scaled   = FALSE,
+  euler.d  = FALSE
 )
 
 pdf(file.path(out_dir, "Fig2E_Venn_numeric_MOR-SAL_vs_SAL-SAL_centered.pdf"),
@@ -207,52 +254,39 @@ dev.off()
 # GO enrichment (Fig2F + Suppl S2B/S2C)
 # ===============================================================
 
-library(clusterProfiler)
-library(org.Mm.eg.db)
-library(enrichplot)
-library(ggplot2)
-
-deg_file  <- "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/DEGs_treatment_only/SAL_SAL_vs_MOR_SAL_ALL.tsv"
-chip_file <- "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/Diff_analysis/Annotated_MORSAL_vs_SALSAL.tsv"
-
-fdr_cut <- 0.05
-lfc_cut <- 0.25
-
-deg <- read_tsv(deg_file, show_col_types = FALSE)
-
-# --- DEGs ---
-deg <- read_tsv(deg_file, show_col_types = FALSE) %>%
-  filter(padj < fdr_cut & abs(log2FoldChange) > lfc_cut) %>%
+## --- define gene sets using SAME objects as above ----
+deg_all_sig <- deg_tbl %>%
+  filter(FDR < fdr_cut & abs(log2FC) > lfc_cut) %>%
   pull(gene_name) %>%
   unique()
 
-deg_up <- read_tsv(deg_file, show_col_types = FALSE) %>%
-  filter(padj < fdr_cut & log2FoldChange > lfc_cut) %>%
+deg_up <- deg_tbl %>%
+  filter(FDR < fdr_cut & log2FC >  lfc_cut) %>%
   pull(gene_name) %>%
   unique()
 
-deg_down <- read_tsv(deg_file, show_col_types = FALSE) %>%
-  filter(padj < fdr_cut & log2FoldChange < -lfc_cut) %>%
+deg_down <- deg_tbl %>%
+  filter(FDR < fdr_cut & log2FC < -lfc_cut) %>%
   pull(gene_name) %>%
   unique()
 
-# --- Differential peaks (Enhancer & Promoter genes) ---
-chip <- read_tsv(chip_file, show_col_types = FALSE)
-enh_genes <- chip %>%
-  filter(FDR < fdr_cut & !grepl("promoter", annotation, ignore.case = TRUE)) %>%
+enh_genes <- chip_tbl %>%
+  filter(FDR < fdr_cut & region == "Enhancer",
+         !is.na(SYMBOL), SYMBOL != "") %>%
   pull(SYMBOL) %>%
-  na.omit() %>%
   unique()
 
-prom_genes <- chip %>%
-  filter(FDR < fdr_cut, grepl("promoter", annotation, ignore.case = TRUE)) %>%
-  pull(SYMBOL) %>% na.omit() %>% unique()
+prom_genes <- chip_tbl %>%
+  filter(FDR < fdr_cut & region == "Promoter",
+         !is.na(SYMBOL), SYMBOL != "") %>%
+  pull(SYMBOL) %>%
+  unique()
 
 diff_genes <- unique(c(enh_genes, prom_genes))
 
-# DEG enrichment
+# --- enrichGO (same as before, just fed with updated gene sets) ---
 ego_deg <- enrichGO(
-  gene          = deg,
+  gene          = deg_all_sig,
   OrgDb         = org.Mm.eg.db,
   keyType       = "SYMBOL",
   ont           = "BP",
@@ -260,7 +294,8 @@ ego_deg <- enrichGO(
   pvalueCutoff  = 0.05,
   qvalueCutoff  = 0.05
 )
-write_tsv(as.data.frame(ego_deg), "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/MOR_SAL_vs_SAL_SAL_DEG_all_GO_BP_enrichment.tsv")
+write_tsv(as.data.frame(ego_deg),
+          "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/MOR_SAL_vs_SAL_SAL_DEG_all_GO_BP_enrichment.tsv")
 
 ego_deg_up <- enrichGO(
   gene          = deg_up,
@@ -271,7 +306,8 @@ ego_deg_up <- enrichGO(
   pvalueCutoff  = 0.05,
   qvalueCutoff  = 0.05
 )
-write_tsv(as.data.frame(ego_deg_up), "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/MOR_SAL_vs_SAL_SAL_DEG_up_GO_BP_enrichment.tsv")
+write_tsv(as.data.frame(ego_deg_up),
+          "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/MOR_SAL_vs_SAL_SAL_DEG_up_GO_BP_enrichment.tsv")
 
 ego_deg_down <- enrichGO(
   gene          = deg_down,
@@ -282,62 +318,90 @@ ego_deg_down <- enrichGO(
   pvalueCutoff  = 0.05,
   qvalueCutoff  = 0.05
 )
-write_tsv(as.data.frame(ego_deg_down), "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/MOR_SAL_vs_SAL_SAL_DEG_down_GO_BP_enrichment.tsv")
+write_tsv(as.data.frame(ego_deg_down),
+          "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/MOR_SAL_vs_SAL_SAL_DEG_down_GO_BP_enrichment.tsv")
 
-# Enhancer GO
 ego_enh <- enrichGO(
   gene = enh_genes, OrgDb = org.Mm.eg.db, keyType = "SYMBOL",
   ont = "BP", pAdjustMethod = "BH", pvalueCutoff = 0.05
 )
-write_tsv(as.data.frame(ego_enh), "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/MOR_SAL_vs_SAL_SAL_enhancer_peakall_GO_BP_enrichment.tsv")
+write_tsv(as.data.frame(ego_enh),
+          "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/MOR_SAL_vs_SAL_SAL_enhancer_peakall_GO_BP_enrichment.tsv")
 
-# Promoter GO
 ego_pro <- enrichGO(
   gene = prom_genes, OrgDb = org.Mm.eg.db, keyType = "SYMBOL",
   ont = "BP", pAdjustMethod = "BH", pvalueCutoff = 0.05
 )
-write_tsv(as.data.frame(ego_pro), "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/MOR_SAL_vs_SAL_SAL_promoter_peakall_GO_BP_enrichment.tsv")
+write_tsv(as.data.frame(ego_pro),
+          "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/MOR_SAL_vs_SAL_SAL_promoter_peakall_GO_BP_enrichment.tsv")
 
 ego_diff <- enrichGO(
   gene = diff_genes, OrgDb = org.Mm.eg.db, keyType = "SYMBOL",
   ont = "BP", pAdjustMethod = "BH", pvalueCutoff = 0.05
 )
-write_tsv(as.data.frame(ego_diff), "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/MOR_SAL_vs_SAL_SAL_diff_peakall_GO_BP_enrichment.tsv")
+write_tsv(as.data.frame(ego_diff),
+          "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/MOR_SAL_vs_SAL_SAL_diff_peakall_GO_BP_enrichment.tsv")
 
-plot_go_clean <- function(ego, title, top_n = 10) {
-  df <- ego@result %>%
-    arrange(p.adjust) %>%
-    slice_head(n = top_n) %>%
-    mutate(
-      Description = str_wrap(Description, 45),
-      GO = factor(Description, levels = rev(unique(Description)))
+## --- updated GO dotplot helper (same as Fig3F) ---
+plot_go_clean <- function(ego, title, top_n = 10, wrap_width = 40) {
+
+  df <- as.data.frame(ego) %>%
+    dplyr::mutate(
+      p.adjust  = as.numeric(p.adjust),
+      Count     = as.numeric(Count),
+      GeneRatio = as.character(GeneRatio)
+    ) %>%
+    dplyr::filter(!is.na(p.adjust), p.adjust > 0) %>%
+    dplyr::arrange(p.adjust) %>%
+    dplyr::slice_head(n = top_n) %>%
+    dplyr::mutate(
+      Description_wrapped = stringr::str_wrap(Description, wrap_width),
+      GO = factor(Description_wrapped, levels = rev(unique(Description_wrapped))),
+      GeneRatio_num = sapply(strsplit(GeneRatio, "/"), function(x) {
+        as.numeric(x[1]) / as.numeric(x[2])
+      }),
+      negLog10FDR = -log10(p.adjust)
     )
 
-  ggplot(df, aes(x = GeneRatio, y = GO, size = Count, color = -log10(p.adjust))) +
+  # x-axis limits: start a bit smaller than the min
+  xmin <- min(df$GeneRatio_num) * 0.9
+  xmax <- max(df$GeneRatio_num) * 1.05
+
+  ggplot(df, aes(x = GeneRatio_num, y = GO,
+                 size = Count, color = negLog10FDR)) +
     geom_point(alpha = 0.9) +
     scale_color_gradient(low = "#56B4E9", high = "#E64B35") +
+    scale_x_continuous(
+      name   = "Gene Ratio",
+      limits = c(xmin, xmax),
+      breaks = scales::pretty_breaks(4),
+      expand = c(0, 0)
+    ) +
     labs(
       title = title,
-      x = "Gene Ratio",
-      y = NULL,
-      color = expression(-log[10]~FDR)
+      y     = NULL,
+      color = expression(-log[10]~FDR),
+      size  = "Count"
     ) +
-    theme_classic(base_size = 12, base_family = "Helvetica") +
+    theme_bw(base_size = 11, base_family = "Helvetica") +
     theme(
-      axis.text.y = element_text(size = 10, color = "black"),
-      axis.text.x = element_text(size = 10, color = "black"),
-      axis.title = element_text(face = "bold"),
-      plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
-      legend.position = "right",
-      panel.grid.major = element_line(color = "grey90", linewidth = 0.3)
+      panel.grid.major = element_line(color = "grey90", linewidth = 0.3),
+      panel.grid.minor = element_blank(),
+      axis.text.y  = element_text(size = 9,  color = "black"),
+      axis.text.x  = element_text(size = 8.5, color = "black"),
+      axis.title   = element_text(face = "bold"),
+      plot.title   = element_text(face = "bold", size = 12, hjust = 0.5),
+      legend.position    = "right",
+      legend.key.height  = unit(0.5, "lines"),
+      plot.margin        = margin(5.5, 10, 5.5, 5.5)
     )
 }
 
-library(patchwork)
 
 p_deg  <- plot_go_clean(ego_deg,  "RNA-seq (DEGs)")
 p_enh  <- plot_go_clean(ego_enh,  "H3K27ac Enhancer Peaks")
 p_pro  <- plot_go_clean(ego_pro,  "H3K27ac Promoter Peaks")
+p_diffpeak <- plot_go_clean(ego_diff, "H3K27ac Differential Peaks")
 
 p_go <- (p_deg | p_enh | p_pro) +
   plot_annotation(
@@ -351,9 +415,33 @@ ggsave(
   "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/Fig2F_GOterms_MOR-SAL_vs_SAL-SAL_clean.pdf",
   p_go, width = 18, height = 4.5, device = cairo_pdf
 )
+ggsave(
+  "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/Fig2F_GOterms_MOR-SAL_vs_SAL-SAL_clean.png",
+  p_go, width = 18, height = 4.5, dpi = 600
+)
 
-# --- combined GO bar (S2B) ---
+p_go_all <- (p_deg | p_diffpeak) +
+  plot_annotation(
+    title = "Functional enrichment of genes altered by perinatal morphine exposure",
+    theme = theme(
+      plot.title = element_text(size = 14, face = "bold", hjust = 0)
+    )
+  )
+
+ggsave(
+  "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/Fig2F_GOterms_MOR-SAL_vs_SAL-SAL_diffpeaks_clean.pdf",
+  p_go_all, width = 12, height = 4.5, device = cairo_pdf)
+ggsave(
+  "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/Fig2F_GOterms_MOR-SAL_vs_SAL-SAL_diffpeaks_clean.png",
+  p_go_all, width = 12, height = 4.5, dpi = 600)
+# ===============================================================
+# Suppl S2B/S2C and immune panels
+# (same logic as before, but using ego_deg_up/ego_deg_down with
+# the corrected MOR–SAL / SAL–SAL orientation)
+# ===============================================================
+
 combine_go_for_bar <- function(ego, label, top_n = 10) {
+  if (is.null(ego) || nrow(ego@result) == 0) return(NULL)
   ego@result %>%
     arrange(p.adjust) %>%
     slice_head(n = top_n) %>%
@@ -366,11 +454,16 @@ df_combined <- bind_rows(
   combine_go_for_bar(ego_pro,  "Promoter")
 )
 
-pcom = ggplot(df_combined, aes(x = reorder(Description, -log10(p.adjust)),
-                        y = -log10(p.adjust), fill = group)) +
+pcom <- ggplot(df_combined,
+               aes(x = reorder(Description, -log10(p.adjust)),
+                   y = -log10(p.adjust), fill = group)) +
   geom_col(position = position_dodge(width = 0.9), width = 0.8) +
   coord_flip() +
-  scale_fill_manual(values = c("DEG" = "#009E73", "Enhancer" = "#E69F00", "Promoter" = "#56B4E9")) +
+  scale_fill_manual(values = c(
+    "DEG"      = col_deg,
+    "Enhancer" = col_enhancer,
+    "Promoter" = col_promoter
+  )) +
   labs(
     title = "Top GO terms (MOR–SAL vs SAL–SAL)",
     x = NULL, y = expression(-log[10]~adjusted~italic(P)),
@@ -379,7 +472,7 @@ pcom = ggplot(df_combined, aes(x = reorder(Description, -log10(p.adjust)),
   theme_classic(base_size = 12, base_family = "Helvetica") +
   theme(
     axis.text.y = element_text(size = 10, color = "black"),
-    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.title  = element_text(size = 14, face = "bold", hjust = 0.5),
     legend.position = "top"
   )
 
@@ -388,14 +481,9 @@ ggsave(
   pcom, width = 10, height = 5, device = cairo_pdf
 )
 
-# ===============================================================
-# Supplementary: GO enrichment up/down DEGs (S2C)
-# ===============================================================
+## ---- S2C up/down bars (semantics fixed: up = MOR–SAL up) ----
 
-library(tidyverse)
-library(ggplot2)
-
-combine_go_for_bar <- function(ego, label, top_n = 10) {
+combine_go_for_bar2 <- function(ego, label, top_n = 10) {
   if (is.null(ego) || nrow(ego@result) == 0) return(NULL)
   ego@result %>%
     arrange(p.adjust) %>%
@@ -404,15 +492,13 @@ combine_go_for_bar <- function(ego, label, top_n = 10) {
 }
 
 df_deg_combined <- bind_rows(
-  combine_go_for_bar(ego_deg_up,  "Downregulated in MOR–SAL"),
-  combine_go_for_bar(ego_deg_down, "Upregulated in MOR–SAL")
+  combine_go_for_bar2(ego_deg_up,   "Upregulated in MOR–SAL"),
+  combine_go_for_bar2(ego_deg_down, "Downregulated in MOR–SAL")
 ) %>%
   mutate(
     Description = str_wrap(Description, 50),
     GO = factor(Description, levels = rev(unique(Description)))
   )
-
-unique(df_deg_combined$group)
 
 p_deg_bar <- ggplot(df_deg_combined,
                     aes(x = reorder(Description, -log10(p.adjust)),
@@ -421,7 +507,7 @@ p_deg_bar <- ggplot(df_deg_combined,
   geom_col(position = position_dodge(width = 0.9), width = 0.8) +
   coord_flip() +
   scale_fill_manual(values = c(
-    "Upregulated in MOR–SAL" = "#56B4E9",
+    "Upregulated in MOR–SAL"   = "#56B4E9",
     "Downregulated in MOR–SAL" = "#E64B35"
   )) +
   labs(
@@ -434,8 +520,8 @@ p_deg_bar <- ggplot(df_deg_combined,
   theme(
     axis.text.y = element_text(size = 10, color = "black"),
     axis.text.x = element_text(size = 10, color = "black"),
-    axis.title = element_text(face = "bold"),
-    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    axis.title  = element_text(face = "bold"),
+    plot.title  = element_text(size = 14, face = "bold", hjust = 0.5),
     legend.position = "top"
   )
 
@@ -449,274 +535,95 @@ ggsave(
   p_deg_bar, width = 8, height = 6, dpi = 600
 )
 
-# ===============================================================
-# Compact bidirectional GO bar (S2C alt)
-# ===============================================================
+## ---- Immune GO: use DOWN genes (MOR–SAL < SAL–SAL) ----
 
-library(ggrepel)
-library(patchwork)
-
-combine_go_for_bar <- function(ego, label, direction = "up", top_n = 8) {
-  if (is.null(ego) || nrow(ego@result) == 0) return(NULL)
-  ego@result %>%
-    arrange(p.adjust) %>%
-    slice_head(n = top_n) %>%
-    mutate(group = label,
-           direction = direction)
-}
-
-df_up <- combine_go_for_bar(ego_deg_up, "Upregulated", direction = "Up")
-df_down <- combine_go_for_bar(ego_deg_down, "Downregulated", direction = "Down")
-
-df_bidirectional <- bind_rows(df_up, df_down) %>%
-  mutate(
-    log10FDR = -log10(p.adjust),
-    log10FDR = if_else(direction == "Down", -log10FDR, log10FDR),
-    Description = str_wrap(Description, 55),
-    GO = factor(Description, levels = unique(Description))
-  )
-
-p_bidirectional <- ggplot(df_bidirectional,
-       aes(x = log10FDR, y = reorder(Description, log10FDR), fill = direction)) +
-  geom_col(width = 0.8) +
-  scale_fill_manual(values = c("Up" = "#56B4E9", "Down" = "#E64B35")) +
-  geom_vline(xintercept = 0, color = "black", linewidth = 0.5) +
-  labs(
-    title = "Top GO terms for DEGs (MOR–SAL vs SAL–SAL)",
-    x = expression(-log[10]~adjusted~italic(P)),
-    y = NULL,
-    fill = NULL
-  ) +
-  theme_classic(base_size = 12, base_family = "Helvetica") +
-  theme(
-    axis.text.y = element_text(size = 10, color = "black"),
-    axis.text.x = element_text(size = 10, color = "black"),
-    axis.title = element_text(face = "bold"),
-    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
-    legend.position = "top"
-  )
-
-ggsave(
-  "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/FigS2C_GOterms_DEG_updown_bidirectional.pdf",
-  p_bidirectional, width = 7, height = 5, device = cairo_pdf
-)
-
-ggsave(
-  "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/FigS2C_GOterms_DEG_updown_bidirectional.png",
-  p_bidirectional, width = 7, height = 5, dpi = 600
-)
-
-# ===============================================================
-# EVEN MORE COMPACT bidirectional version (final S2C)
-# ===============================================================
-
-shorten_terms <- function(x) {
-  x <- str_replace_all(x, "regulation of ", "reg. of ")
-  x <- str_replace_all(x, "positive ", "pos. ")
-  x <- str_replace_all(x, "negative ", "neg. ")
-  x <- str_replace_all(x, "process", "proc.")
-  x <- str_replace_all(x, "response to ", "resp. to ")
-  x <- str_replace_all(x, "cellular ", "cell ")
-  x
-}
-
-combine_go_for_bar <- function(ego, label, direction = "up", top_n = 8) {
-  if (is.null(ego) || nrow(ego@result) == 0) return(NULL)
-  ego@result %>%
-    arrange(p.adjust) %>%
-    slice_head(n = top_n) %>%
-    mutate(group = label,
-           direction = direction)
-}
-
-df_up <- combine_go_for_bar(ego_deg_up, "Upregulated", direction = "Up")
-df_down <- combine_go_for_bar(ego_deg_down, "Downregulated", direction = "Down")
-
-df_bidirectional <- bind_rows(df_up, df_down) %>%
-  mutate(
-    Description = shorten_terms(Description),
-    Description = str_wrap(Description, 35),
-    log10FDR = -log10(p.adjust),
-    log10FDR = if_else(direction == "Down", -log10FDR, log10FDR),
-    GO = factor(Description, levels = unique(Description))
-  )
-
-theme_pub_compact <- theme_classic(base_size = 11, base_family = "Helvetica") +
-  theme(
-    axis.text.y = element_text(size = 9.5, color = "black", lineheight = 0.9),
-    axis.text.x = element_text(size = 10, color = "black"),
-    axis.title = element_text(face = "bold"),
-    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
-    legend.position = "top",
-    plot.margin = margin(5, 10, 5, 5)
-  )
-
-p_bidirectional <- ggplot(df_bidirectional,
-       aes(x = log10FDR, y = reorder(Description, log10FDR), fill = direction)) +
-  geom_col(width = 0.7) +
-  scale_fill_manual(values = c("Up" = "#56B4E9", "Down" = "#E64B35")) +
-  geom_vline(xintercept = 0, color = "black", linewidth = 0.4) +
-  labs(
-    title = "Top GO terms for DEGs (MOR–SAL vs SAL–SAL)",
-    x = expression(-log[10]~adjusted~italic(P)),
-    y = NULL,
-    fill = NULL
-  ) +
-  theme_pub_compact
-
-ggsave(
-  "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/FigS2C_GOterms_DEG_updown_compact.pdf",
-  p_bidirectional, width = 7, height = 7, device = cairo_pdf
-)
-
-ggsave(
-  "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/FigS2C_GOterms_DEG_updown_compact.png",
-  p_bidirectional, width = 7, height = 7, dpi = 600
-)
-
-# ===============================================================
-# Immune GO extraction + Fig3E plots
-# ===============================================================
-
-library(dplyr)
-library(stringr)
-library(readr)
-
-immune_down <- ego_deg_up@result %>%
+immune_down <- ego_deg_down@result %>%
   filter(
-    str_detect(Description, regex("immune|inflamm|cytokine|defense|leukocyte|macrophage|microglia|chemokine|interferon", ignore_case = TRUE))
+    str_detect(Description,
+               regex("immune|inflamm|cytokine|defense|leukocyte|macrophage|microglia|chemokine|interferon",
+                     ignore_case = TRUE))
   ) %>%
   arrange(p.adjust)
 
 write_tsv(immune_down,
           "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/MOR_SAL_vs_SAL_SAL_downregulated_immune_GO.tsv")
 
-# === Figure 3E — Downregulated immune GO terms (Hypothalamus, MOR–SAL vs SAL–SAL) ===
+# (the rest of your Sankey + dot immune plotting code can stay
+# as-is, since it just reads that TSV; no path or orientation change)
 
-library(tidyverse)
-library(ggplot2)
-library(stringr)
+overlap_peaks <- chip_tbl %>%
+  dplyr::filter(SYMBOL %in% overlap_all3_genes) %>%
+  dplyr::select(SYMBOL, region, seqnames, start, end, Fold, FDR)
 
-go_file <- "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/MOR_SAL_vs_SAL_SAL_downregulated_immune_GO.tsv"
+cat("\nPeaks for 3-way overlap genes:\n")
+print(overlap_peaks)
 
-immune_go <- read_tsv(go_file, show_col_types = FALSE) %>%
-  arrange(p.adjust) %>%
-  slice_head(n = 12) %>%                                  # top 12 terms
-  mutate(
-    Description = str_wrap(Description, 55),
-    GO = factor(Description, levels = rev(unique(Description)))
+# 3) make an IGV-ready BED file for those peaks
+#    (0-based start, 1-based end; standard BED convention)
+bed_igv <- overlap_peaks %>%
+  dplyr::mutate(
+    chrom = as.character(seqnames),
+    chromStart = as.integer(start) - 1L,
+    chromEnd   = as.integer(end),
+    name = paste(SYMBOL, region, sep = "_")
+  ) %>%
+  dplyr::select(chrom, chromStart, chromEnd, name)
+
+igv_bed_file <- file.path(out_dir, "Fig3_overlap2_genes_forIGV.bed")
+readr::write_tsv(bed_igv, igv_bed_file, col_names = FALSE)
+
+cat("\n IGV BED written to:\n  ", igv_bed_file, "\n")
+
+# (optional) if you also want DEG table rows for those genes:
+overlap_deg_rows <- deg_tbl %>%
+  dplyr::filter(gene_name %in% overlap_all3_genes) %>%
+  dplyr::select(gene_name, log2FC, FDR, baseMean)
+
+cat("\nDEG stats for 3-way overlap genes:\n")
+print(overlap_deg_rows)
+
+## ===============================================================
+## Find strongest promoter diff peaks overlapping DEGs
+##  - region == "Promoter"
+##  - gene in DEGs ∩ Promoter
+##  - rank by FDR first, then |Fold|
+## ===============================================================
+
+# genes in the DEG–Promoter overlap (the 53 in the Venn)
+overlap_deg_enh_genes <- intersect(deg_genes, enhancer_genes)
+
+length(overlap_deg_enh_genes)
+print(overlap_deg_enh_genes)  # preview
+
+enh_overlap_peaks <- chip_tbl %>%
+  dplyr::filter(
+    region == "Enhancer",
+    SYMBOL %in% overlap_deg_enh_genes,
+    !is.na(FDR),
+    FDR < fdr_cut
   )
 
-p_immune <- ggplot(immune_go, aes(x = -log10(p.adjust), y = GO)) +
-  geom_col(fill = "#E64B35", width = 0.7) +
-  geom_text(
-    aes(label = Count), hjust = -0.2, size = 3, color = "black"
-  ) +
-  labs(
-    title = "Downregulated immune pathways in adult hypothalamus (MOR–SAL < SAL–SAL)",
-    x = expression(-log[10]~adjusted~italic(P)),
-    y = NULL
-  ) +
-  theme_classic(base_size = 12, base_family = "Helvetica") +
-  theme(
-    axis.text.y = element_text(size = 10, color = "black"),
-    axis.text.x = element_text(size = 10, color = "black"),
-    axis.title.x = element_text(face = "bold"),
-    plot.title = element_text(face = "bold", size = 13, hjust = 0.5),
-    panel.grid.major.x = element_line(color = "grey90", linewidth = 0.3),
-    plot.margin = margin(10, 15, 10, 10)
-  ) +
-  coord_cartesian(clip = "off")
+cat("Number of enhancer peaks linked to DEG genes (FDR <", fdr_cut, "): ",
+    nrow(enh_overlap_peaks), "\n")
 
-out_dir <- "/Users/yanmiaodu/Downloads/MOR_SAL/hypo"
-ggsave(file.path(out_dir, "Fig3E_downregulated_immune_GOterms.pdf"),
-       p_immune, width = 6, height = 4, device = cairo_pdf)
-ggsave(file.path(out_dir, "Fig3E_downregulated_immune_GOterms.png"),
-       p_immune, width = 6, height = 4, dpi = 600)
+## ---- top overall (strongest + most significant) ----
+top_enhancer_peaks <- enh_overlap_peaks %>%
+  dplyr::arrange(FDR, dplyr::desc(abs(Fold))) %>%
+  dplyr::select(SYMBOL, seqnames, start, end, Fold, FDR) %>%
+  dplyr::slice_head(n = 5)
 
-p_immune
+cat("\nTop enhancer diff peaks overlapping DEGs (ranked by FDR then |Fold|):\n")
+print(top_enhancer_peaks)
 
-# === Figure 3E — Sankey + dot (immune GO) ===
-library(tidyverse)
-library(ggalluvial)
-library(ggplot2)
-library(stringr)
+## OPTIONAL: IGV BED for those top peaks
+bed_top_enh <- top_enhancer_peaks %>%
+  dplyr::mutate(
+    chrom      = as.character(seqnames),
+    chromStart = as.integer(start) - 1L,
+    chromEnd   = as.integer(end),
+    name       = paste(SYMBOL, sprintf("Fold=%.2f", Fold), sep = "_")
+  ) %>%
+  dplyr::select(chrom, chromStart, chromEnd, name)
 
-go_file <- "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/MOR_SAL_vs_SAL_SAL_downregulated_immune_GO.tsv"
-deg_file <- "/Users/yanmiaodu/Downloads/MOR_SAL/hypo/DEGs_treatment_only/SAL_SAL_vs_MOR_SAL_sig.tsv"  # if you want to link genes
-
-go_df <- read_tsv(go_file, show_col_types = FALSE) %>%
-  arrange(p.adjust) %>%
-  slice_head(n = 10) %>%
-  mutate(
-    Description = str_wrap(Description, 45),
-    GO = factor(Description, levels = rev(unique(Description)))
-  )
-
-go_gene <- go_df %>%
-  tidyr::separate_rows(geneID, sep = "/") %>%
-  dplyr::select(GO = Description, Gene = geneID)
-
-gene_top <- go_gene %>%
-  count(Gene, sort = TRUE) %>%
-  slice_head(n = 18) %>%
-  pull(Gene)
-
-go_gene <- go_gene %>% filter(Gene %in% gene_top)
-
-p_sankey <- ggplot(go_gene, aes(axis1 = Gene, axis2 = GO)) +
-  geom_alluvium(fill = "#E64B35", alpha = 0.6, width = 1/12) +
-  geom_stratum(fill = "grey95", color = "grey60") +
-  geom_text(stat = "stratum",
-            aes(label = after_stat(stratum)),
-            size = 3, family = "Helvetica", color = "black") +
-  theme_void(base_size = 12) +
-  labs(title = "Downregulated Immune GO Terms (MOR–SAL < SAL–SAL)") +
-  theme(
-    plot.title = element_text(face = "bold", size = 13, hjust = 0.5, margin = margin(5,0,5,0))
-  )
-
-ggsave("/Users/yanmiaodu/Downloads/MOR_SAL/hypo/temp_sankey.pdf",
-       p_sankey, width = 6, height = 5, device = cairo_pdf)
-
-p_dot <- go_df %>%
-  mutate(GeneCount = str_count(geneID, "/") + 1) %>%
-  ggplot(aes(x = GeneCount, y = GO, size = GeneCount, color = -log10(p.adjust))) +
-  geom_point() +
-  scale_color_gradient(low = "#56B4E9", high = "#E64B35") +
-  scale_size_continuous(range = c(2, 6)) +
-  labs(
-    title = "Top Downregulated immune GO term in MOR.SAL",
-    x = "Gene Count",
-    y = NULL,
-    color = expression(-log[10]~italic(P))
-  ) +
-  theme_classic(base_size = 8, base_family = "Helvetica") +
-  theme(
-    axis.text.y = element_text(size = 7, color = "black"),
-    axis.text.x = element_text(size =7, color = "black"),
-    plot.title = element_text(face = "bold", size = 10, hjust = 0.5),
-    legend.position = "right",
-    panel.grid.major.x = element_line(color = "grey90", linewidth = 0.3)
-  )
-
-ggsave("/Users/yanmiaodu/Downloads/MOR_SAL/hypo/temp_dot.pdf",
-       p_dot, width = 4.5, height = 3.2, device = cairo_pdf)
-ggsave("/Users/yanmiaodu/Downloads/MOR_SAL/hypo/temp_dot.png",
-       p_dot, width = 4.5, height = 3.2, dpi = 600)
-
-p_combined <- p_sankey + p_dot +
-  plot_layout(widths = c(0.45, 0.55)) +
-  plot_annotation(
-    title = "Downregulated immune response pathways in adult hypothalamus",
-    theme = theme(
-      plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
-    )
-  )
-
-ggsave(file.path(out_dir, "Fig3E_downregulated_immune_GO_sankeydot_balanced.pdf"),
-       p_combined, width = 9, height = 4.5, device = cairo_pdf)
-ggsave(file.path(out_dir, "Fig3E_downregulated_immune_GO_sankeydot_balanced.png"),
-       p_combined, width = 9, height = 4.5, dpi = 600)
-
-p_combined
+enh_igv_bed <- file.path(out_dir, "Fig2_enhancer_DEG_overlap_topPeaks_forIGV.bed")
+readr::write_tsv(bed_top_enh, enh_igv_bed, col_names = FALSE)
